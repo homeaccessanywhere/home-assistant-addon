@@ -1,0 +1,14 @@
+name: "Home Assistant Anywhere"
+description: "Access your Home Assistant from anywhere via homeassistantanywhere.com"
+version: "1.0.0"
+slug: "haa"
+url: "https://homeassistantanywhere.com"
+arch:
+  - amd64
+  - aarch64
+init: false
+homeassistant_api: true
+options:
+  connection_key: ""
+schema:
+  connection_key: str
