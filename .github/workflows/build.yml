@@ -1,0 +1,74 @@
+name: Build Addon Images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'haa/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: homeassistantanywhere/haa-addon
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        arch: [amd64, aarch64, armv7]
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            dotnet_rid: linux-musl-x64
+          - arch: aarch64
+            platform: linux/arm64
+            dotnet_rid: linux-musl-arm64
+          - arch: armv7
+            platform: linux/arm/v7
+            dotnet_rid: linux-musl-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish addon for ${{ matrix.arch }}
+        run: |
+          dotnet publish src/HAA.Addon/HAA.Addon.csproj \
+            -c Release \
+            -r ${{ matrix.dotnet_rid }} \
+            --self-contained false \
+            -o haa/rootfs/app
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: haa
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }}:latest
+          build-args: |
+            BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base:3.19

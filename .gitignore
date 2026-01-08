@@ -1,0 +1,16 @@
+# Build outputs
+**/bin/
+**/obj/
+
+# IDE
+.vs/
+.vscode/
+*.user
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Keep rootfs/app clean (will be populated by CI)
+haa/rootfs/app/*
+!haa/rootfs/app/.gitkeep
