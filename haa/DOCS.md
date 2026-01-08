@@ -25,4 +25,4 @@ This addon creates a secure outbound WebSocket connection to our server. No port
 ## Support
 
 - Website: https://homeassistantanywhere.com
-- Issues: https://github.com/databot/home-assistant-anywhere/issues
+- Issues: https://github.com/homeassistantanywhere/home-assistant-addon/issues
