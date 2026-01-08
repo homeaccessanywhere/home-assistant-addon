@@ -1,11 +1,13 @@
 name: "Home Assistant Anywhere"
 description: "Access your Home Assistant from anywhere via homeassistantanywhere.com"
-version: "1.0.0"
+version: "1.0.1"
 slug: "haa"
 url: "https://homeassistantanywhere.com"
+image: ghcr.io/homeassistantanywhere/haa-addon-{arch}
 arch:
   - amd64
   - aarch64
+  - armv7
 init: false
 homeassistant_api: true
 options:
