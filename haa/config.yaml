@@ -14,7 +14,5 @@ map:
   - homeassistant_config:ro
 options:
   connection_key: ""
-  home_assistant_url: ""
 schema:
-  connection_key: str
-  home_assistant_url: str?
+  connection_key: "match(^[a-zA-Z0-9_-]{3,}$)"
