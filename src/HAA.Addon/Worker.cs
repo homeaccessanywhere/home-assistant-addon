@@ -24,7 +24,7 @@ public class Worker : BackgroundService
             ?? "wss://api.homeassistantanywhere.com";
 
         var homeAssistantUrl = _configuration.GetValue<string>("HomeAssistantUrl")
-            ?? "http://homeassistant.local:8123";
+            ?? "http://homeassistant:8123";
 
         _logger.LogInformation("Starting Home Assistant Anywhere Addon");
         _logger.LogInformation("Server: {ServerUrl}", serverUrl);

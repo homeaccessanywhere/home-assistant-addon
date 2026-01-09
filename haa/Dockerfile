@@ -2,7 +2,7 @@
 ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
-# Install .NET runtime
+# Install dependencies
 RUN apk add --no-cache \
     bash \
     icu-libs \
@@ -11,7 +11,8 @@ RUN apk add --no-cache \
     libintl \
     libssl3 \
     libstdc++ \
-    zlib
+    zlib \
+    yq
 
 # Download and install .NET Runtime
 ARG DOTNET_VERSION=8.0.11

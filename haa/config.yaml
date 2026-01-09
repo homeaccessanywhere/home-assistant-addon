@@ -10,9 +10,11 @@ arch:
   - armv7
 init: false
 homeassistant_api: true
+map:
+  - homeassistant_config:ro
 options:
   connection_key: ""
-  home_assistant_url: "http://supervisor/core"
+  home_assistant_url: ""
 schema:
   connection_key: str
-  home_assistant_url: url?
+  home_assistant_url: str?
