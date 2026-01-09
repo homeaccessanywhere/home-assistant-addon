@@ -37,7 +37,15 @@ public class TunnelClient : IAsyncDisposable
         _homeAssistantUrl = homeAssistantUrl.TrimEnd('/');
         _logger = logger;
 
-        _haHttpClient = new HttpClient
+        // Skip SSL certificate validation for internal connections
+        // This is safe because we're connecting within the Docker network
+        // and the certificate may be issued for an external domain
+        var handler = new HttpClientHandler
+        {
+            ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => true
+        };
+
+        _haHttpClient = new HttpClient(handler)
         {
             BaseAddress = new Uri(_homeAssistantUrl),
             Timeout = TimeSpan.FromSeconds(Constants.DefaultRequestTimeoutSeconds)
@@ -420,6 +428,9 @@ public class TunnelClient : IAsyncDisposable
         {
             var wsClient = new ClientWebSocket();
             wsClient.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
+
+            // Skip SSL certificate validation for internal connections
+            wsClient.Options.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
 
             // Build the WebSocket URL
             var wsUrl = _homeAssistantUrl.Replace("http://", "ws://").Replace("https://", "wss://");
