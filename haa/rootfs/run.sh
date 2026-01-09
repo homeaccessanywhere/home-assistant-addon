@@ -5,6 +5,7 @@ CONFIG_PATH=/data/options.json
 
 # Read configuration
 CONNECTION_KEY=$(jq -r '.connection_key' $CONFIG_PATH)
+HOME_ASSISTANT_URL=$(jq -r '.home_assistant_url // "http://supervisor/core"' $CONFIG_PATH)
 
 if [ -z "$CONNECTION_KEY" ] || [ "$CONNECTION_KEY" == "null" ]; then
     echo "============================================"
@@ -23,7 +24,9 @@ echo "Connection key: ${CONNECTION_KEY:0:8}..."
 # Configure environment
 export ServerUrl="wss://api.homeassistantanywhere.com"
 export ConnectionKey="$CONNECTION_KEY"
-export HomeAssistantUrl="http://homeassistant:8123"
+export HomeAssistantUrl="$HOME_ASSISTANT_URL"
+
+echo "Home Assistant URL: $HOME_ASSISTANT_URL"
 
 # Run the addon
 cd /app

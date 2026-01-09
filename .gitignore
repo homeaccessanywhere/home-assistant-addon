@@ -7,6 +7,9 @@
 .vscode/
 *.user
 
+# Development config (may contain test keys)
+appsettings.Development.json
+
 # OS files
 .DS_Store
 Thumbs.db
