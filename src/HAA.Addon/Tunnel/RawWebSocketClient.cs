@@ -66,8 +66,7 @@ public class RawWebSocketClient : IDisposable
                 var sslStream = new SslStream(stream, false, (sender, cert, chain, errors) => true);
                 await sslStream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
                 {
-                    TargetHost = host,
-                    RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true
+                    TargetHost = host
                 }, cancellationToken);
                 stream = sslStream;
             }
