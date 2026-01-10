@@ -5,6 +5,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>dotnet-HAA.Addon-ee89da5a-719d-4b6c-b630-6dfadb1ede8e</UserSecretsId>
+    <!-- Use workstation GC for lower memory footprint -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <!-- Sustain memory limit - be more aggressive about GC when memory pressure is high -->
+    <GarbageCollectionAdaptationMode>1</GarbageCollectionAdaptationMode>
   </PropertyGroup>
 
   <ItemGroup>

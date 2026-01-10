@@ -10,6 +10,9 @@ arch:
   - armv7
 init: false
 homeassistant_api: true
+# Increase memory limit for heavy WebSocket traffic (like Code Server)
+# 256KB frames + base64 encoding + JSON overhead needs headroom
+memory_limit: 768m
 map:
   - homeassistant_config:ro
 options:

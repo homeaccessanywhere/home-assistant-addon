@@ -16,7 +16,7 @@ public class TunnelClient : IAsyncDisposable
     private readonly string _homeAssistantUrl;
     private readonly HttpClient _haHttpClient;
     private readonly ILogger<TunnelClient> _logger;
-    private readonly ConcurrentDictionary<string, ClientWebSocket> _activeWebSockets = new();
+    private readonly ConcurrentDictionary<string, RawWebSocketClient> _activeWebSockets = new();
 
     private ClientWebSocket? _webSocket;
     private CancellationTokenSource? _cts;
@@ -155,23 +155,17 @@ public class TunnelClient : IAsyncDisposable
         return false;
     }
 
-    private async Task<string?> GetHomeAssistantVersionAsync()
+    private Task<string?> GetHomeAssistantVersionAsync()
     {
-        try
-        {
-            var response = await _haHttpClient.GetStringAsync("/api/config");
-            // Parse version from response if needed
-            return null; // Simplified
-        }
-        catch
-        {
-            return null;
-        }
+        // Skip this check - it requires auth and isn't essential
+        // The HA version can be obtained through other means if needed
+        return Task.FromResult<string?>(null);
     }
 
     private async Task RunReceiveLoopAsync(CancellationToken cancellationToken)
     {
-        var buffer = new byte[Constants.MaxWebSocketMessageSize];
+        // Use smaller buffer - WebSocket fragments large messages, we accumulate in MemoryStream
+        var buffer = new byte[65536];
 
         try
         {
@@ -257,6 +251,9 @@ public class TunnelClient : IAsyncDisposable
         }
     }
 
+    // Maximum HTTP response chunk size (64KB raw = ~85KB base64)
+    private const int MaxHttpChunkSize = 65536;
+
     private async Task HandleHttpRequestAsync(TunnelHttpRequest request, CancellationToken cancellationToken)
     {
         var startTime = DateTimeOffset.UtcNow;
@@ -290,7 +287,7 @@ public class TunnelClient : IAsyncDisposable
                 }
             }
 
-            // Send to Home Assistant - use ResponseHeadersRead to avoid waiting for streaming responses
+            // Send to Home Assistant - use ResponseHeadersRead to stream response
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
             // Check if this is a streaming endpoint (logs, events, etc.)
@@ -307,88 +304,70 @@ public class TunnelClient : IAsyncDisposable
                 HttpCompletionOption.ResponseHeadersRead,
                 cts.Token);
 
-            // Build tunnel response
-            var response = new TunnelHttpResponse
-            {
-                RequestId = request.RequestId,
-                StatusCode = (int)haResponse.StatusCode,
-                ReasonPhrase = haResponse.ReasonPhrase,
-                ProcessingTimeMs = (long)(DateTimeOffset.UtcNow - startTime).TotalMilliseconds
-            };
-
-            // Copy response headers as-is
+            // Collect headers
+            var headers = new Dictionary<string, string[]>();
             foreach (var header in haResponse.Headers)
             {
-                response.Headers[header.Key] = header.Value.ToArray();
+                headers[header.Key] = header.Value.ToArray();
             }
             foreach (var header in haResponse.Content.Headers)
             {
-                response.Headers[header.Key] = header.Value.ToArray();
+                headers[header.Key] = header.Value.ToArray();
             }
 
-            // Copy response body - for streaming endpoints, read available data with timeout
-            byte[] responseBody;
-            if (isStreamingEndpoint)
+            var processingTime = (long)(DateTimeOffset.UtcNow - startTime).TotalMilliseconds;
+
+            // Stream the response body in chunks
+            await using var stream = await haResponse.Content.ReadAsStreamAsync(cts.Token);
+            var buffer = new byte[MaxHttpChunkSize];
+            bool isFirstChunk = true;
+            bool endOfStream = false;
+
+            while (!endOfStream)
             {
-                // For streaming endpoints, read chunks until timeout
-                using var ms = new MemoryStream();
-                var buffer = new byte[8192];
-                var streamReadTimeout = TimeSpan.FromSeconds(3);
-                var readStartTime = DateTime.UtcNow;
-
-                try
+                // Fill buffer completely if possible
+                int bytesInBuffer = 0;
+                while (bytesInBuffer < MaxHttpChunkSize)
                 {
-                    await using var stream = await haResponse.Content.ReadAsStreamAsync(cts.Token);
+                    var bytesRead = await stream.ReadAsync(
+                        buffer.AsMemory(bytesInBuffer, MaxHttpChunkSize - bytesInBuffer),
+                        cts.Token);
 
-                    // Reuse CTS across iterations to avoid allocations
-                    using var readCts = new CancellationTokenSource();
-
-                    while (DateTime.UtcNow - readStartTime < streamReadTimeout && !cts.Token.IsCancellationRequested)
+                    if (bytesRead == 0)
                     {
-                        readCts.CancelAfter(TimeSpan.FromMilliseconds(500));
-
-                        try
-                        {
-                            var bytesRead = await stream.ReadAsync(buffer, readCts.Token);
-                            if (bytesRead == 0)
-                                break; // End of stream
-
-                            ms.Write(buffer, 0, bytesRead);
-
-                            // Reset for next iteration
-                            if (!readCts.TryReset())
-                                break; // CTS exhausted, stop reading
-                        }
-                        catch (OperationCanceledException) when (readCts.IsCancellationRequested && !cts.Token.IsCancellationRequested)
-                        {
-                            // Read timeout - check if we have data
-                            if (ms.Length > 0)
-                                break; // We have some data, return it
-
-                            // No data yet, try to reset and continue waiting
-                            if (!readCts.TryReset())
-                                break;
-                        }
+                        endOfStream = true;
+                        break;
                     }
+                    bytesInBuffer += bytesRead;
                 }
-                catch (Exception ex)
+
+                // Skip empty chunks (except first one which carries headers)
+                if (bytesInBuffer == 0 && !isFirstChunk)
+                    break;
+
+                var response = new TunnelHttpResponse
                 {
-                    _logger.LogWarning(ex, "Error reading streaming response for {Path}", request.Path);
+                    RequestId = request.RequestId,
+                    StatusCode = (int)haResponse.StatusCode,
+                    ReasonPhrase = haResponse.ReasonPhrase,
+                    ProcessingTimeMs = processingTime,
+                    HasMoreChunks = !endOfStream
+                };
+
+                // Only send headers on first chunk
+                if (isFirstChunk)
+                {
+                    response.Headers = headers;
+                    isFirstChunk = false;
                 }
 
-                responseBody = ms.ToArray();
-            }
-            else
-            {
-                responseBody = await haResponse.Content.ReadAsByteArrayAsync(cts.Token);
-            }
+                if (bytesInBuffer > 0)
+                {
+                    response.SetBody(buffer.AsSpan(0, bytesInBuffer));
+                }
 
-            if (responseBody.Length > 0)
-            {
-                response.SetBody(responseBody);
+                await SendMessageAsync(response, cancellationToken);
             }
-
-            await SendMessageAsync(response, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -417,8 +396,6 @@ public class TunnelClient : IAsyncDisposable
 
     private async Task HandleWebSocketOpenAsync(WebSocketOpenMessage open, CancellationToken cancellationToken)
     {
-        _logger.LogDebug("Opening WebSocket connection {ConnectionId} to {Path}", open.ConnectionId, open.Path);
-
         var response = new WebSocketOpenResponseMessage
         {
             ConnectionId = open.ConnectionId
@@ -426,23 +403,15 @@ public class TunnelClient : IAsyncDisposable
 
         try
         {
-            var wsClient = new ClientWebSocket();
-            wsClient.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
-
-            // Skip SSL certificate validation for internal connections
-            wsClient.Options.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
-
-            // Build the WebSocket URL
             var wsUrl = _homeAssistantUrl.Replace("http://", "ws://").Replace("https://", "wss://");
             wsUrl = $"{wsUrl}{open.Path}";
 
-            _logger.LogDebug("Connecting WebSocket to {Url}", wsUrl);
-            await wsClient.ConnectAsync(new Uri(wsUrl), cancellationToken);
-            _logger.LogDebug("WebSocket connected successfully to {Url}", wsUrl);
+            var wsClient = await RawWebSocketClient.ConnectAsync(new Uri(wsUrl), _logger, open.Headers, cancellationToken);
 
             if (!_activeWebSockets.TryAdd(open.ConnectionId, wsClient))
             {
-                await wsClient.CloseAsync(WebSocketCloseStatus.InternalServerError, "Duplicate connection", cancellationToken);
+                await wsClient.CloseAsync(1011, "Duplicate connection");
+                wsClient.Dispose();
                 response.Success = false;
                 response.ErrorMessage = "Duplicate connection ID";
             }
@@ -464,60 +433,137 @@ public class TunnelClient : IAsyncDisposable
         await SendMessageAsync(response, cancellationToken);
     }
 
-    private async Task RelayWebSocketFromHaAsync(string connectionId, ClientWebSocket wsClient, CancellationToken cancellationToken)
+    // Maximum chunk size for WebSocket data to reduce memory pressure from base64 encoding
+    // 64KB raw = ~85KB base64, manageable for GC
+    private const int MaxChunkSize = 65536;
+
+    private async Task RelayWebSocketFromHaAsync(string connectionId, RawWebSocketClient wsClient, CancellationToken cancellationToken)
     {
-        var buffer = new byte[8192];
+        // Track the opcode of the current fragmented message
+        WebSocketOpcode? fragmentedMessageOpcode = null;
+        bool closeSent = false;
 
         try
         {
-            while (!cancellationToken.IsCancellationRequested && wsClient.State == WebSocketState.Open)
+            while (!cancellationToken.IsCancellationRequested && wsClient.IsConnected)
             {
-                var result = await wsClient.ReceiveAsync(buffer, cancellationToken);
-
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    var closeMessage = new WebSocketCloseMessage
-                    {
-                        ConnectionId = connectionId,
-                        StatusCode = (int)(result.CloseStatus ?? WebSocketCloseStatus.NormalClosure),
-                        Reason = result.CloseStatusDescription
-                    };
-                    await SendMessageAsync(closeMessage, cancellationToken);
+                var frame = await wsClient.ReceiveFrameAsync(cancellationToken);
+                if (frame == null)
                     break;
-                }
 
-                var dataMessage = new WebSocketDataMessage
+                var opcode = frame.Value.Opcode;
+                var payloadLength = frame.Value.PayloadLength;
+                var isFinal = frame.Value.IsFinal;
+                var payload = frame.Value.Payload;
+
+                try
                 {
-                    ConnectionId = connectionId,
-                    IsText = result.MessageType == WebSocketMessageType.Text,
-                    EndOfMessage = result.EndOfMessage
-                };
-                // Use Span overload to avoid allocation
-                dataMessage.SetData(buffer.AsSpan(0, result.Count));
+                    switch (opcode)
+                    {
+                        case WebSocketOpcode.Close:
+                            var statusCode = payloadLength >= 2
+                                ? (payload[0] << 8) | payload[1]
+                                : 1000;
+                            var reason = payloadLength > 2
+                                ? Encoding.UTF8.GetString(payload, 2, payloadLength - 2)
+                                : null;
 
-                await SendMessageAsync(dataMessage, cancellationToken);
+                            var closeMessage = new WebSocketCloseMessage
+                            {
+                                ConnectionId = connectionId,
+                                StatusCode = statusCode,
+                                Reason = reason
+                            };
+                            await SendMessageAsync(closeMessage, cancellationToken);
+                            closeSent = true;
+                            return;
+
+                        case WebSocketOpcode.Ping:
+                            await wsClient.SendFrameAsync(WebSocketOpcode.Pong, payload.AsMemory(0, payloadLength), true, cancellationToken);
+                            continue;
+
+                        case WebSocketOpcode.Pong:
+                            continue;
+
+                        case WebSocketOpcode.Text:
+                        case WebSocketOpcode.Binary:
+                            fragmentedMessageOpcode = opcode;
+                            await SendChunkedDataAsync(connectionId, payload, payloadLength,
+                                opcode == WebSocketOpcode.Text, isFinal, cancellationToken);
+                            if (isFinal)
+                                fragmentedMessageOpcode = null;
+                            break;
+
+                        case WebSocketOpcode.Continuation:
+                            await SendChunkedDataAsync(connectionId, payload, payloadLength,
+                                fragmentedMessageOpcode == WebSocketOpcode.Text, isFinal, cancellationToken);
+                            if (isFinal)
+                                fragmentedMessageOpcode = null;
+                            break;
+                    }
+                }
+                finally
+                {
+                    // Always return the payload buffer to the pool
+                    if (payloadLength > 0)
+                    {
+                        RawWebSocketClient.ReturnBuffer(payload);
+                    }
+                }
             }
         }
-        catch (WebSocketException ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogDebug(ex, "WebSocket error for {ConnectionId}", connectionId);
-        }
-        catch (OperationCanceledException)
-        {
-            // Normal shutdown
+            _logger.LogWarning(ex, "WebSocket relay error for {ConnectionId}", connectionId);
         }
         finally
         {
             _activeWebSockets.TryRemove(connectionId, out _);
-            if (wsClient.State == WebSocketState.Open)
+            try { await wsClient.CloseAsync(1000, "Connection closed"); } catch { }
+            wsClient.Dispose();
+
+            // Notify server that this WebSocket connection is closed (if not already sent)
+            if (!closeSent)
             {
                 try
                 {
-                    await wsClient.CloseAsync(WebSocketCloseStatus.NormalClosure, "Connection closed", CancellationToken.None);
+                    var closeMsg = new WebSocketCloseMessage
+                    {
+                        ConnectionId = connectionId,
+                        StatusCode = 1001,
+                        Reason = "Connection lost"
+                    };
+                    await SendMessageAsync(closeMsg, CancellationToken.None);
                 }
                 catch { }
             }
-            wsClient.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Sends payload data in chunks to reduce memory pressure from base64 encoding
+    /// </summary>
+    private async Task SendChunkedDataAsync(string connectionId, byte[] payload, int payloadLength,
+        bool isText, bool isFinalFrame, CancellationToken cancellationToken)
+    {
+        int offset = 0;
+
+        while (offset < payloadLength)
+        {
+            var chunkSize = Math.Min(MaxChunkSize, payloadLength - offset);
+            var isLastChunk = (offset + chunkSize) >= payloadLength;
+
+            var dataMessage = new WebSocketDataMessage
+            {
+                ConnectionId = connectionId,
+                IsText = isText,
+                // Only mark as end of message if this is the last chunk AND the original frame was final
+                EndOfMessage = isLastChunk && isFinalFrame
+            };
+            dataMessage.SetData(payload.AsSpan(offset, chunkSize));
+            await SendMessageAsync(dataMessage, cancellationToken);
+
+            offset += chunkSize;
         }
     }
 
@@ -529,7 +575,7 @@ public class TunnelClient : IAsyncDisposable
             return;
         }
 
-        if (wsClient.State != WebSocketState.Open)
+        if (!wsClient.IsConnected)
             return;
 
         var bytes = data.GetDataBytes();
@@ -538,13 +584,11 @@ public class TunnelClient : IAsyncDisposable
 
         try
         {
-            await wsClient.SendAsync(
-                bytes,
-                data.IsText ? WebSocketMessageType.Text : WebSocketMessageType.Binary,
-                data.EndOfMessage,
-                cancellationToken);
+            var opcode = data.IsText ? WebSocketOpcode.Text : WebSocketOpcode.Binary;
+            // Pass as ReadOnlyMemory to use the optimized SendFrameAsync
+            await wsClient.SendFrameAsync(opcode, bytes.AsMemory(), data.EndOfMessage, cancellationToken);
         }
-        catch (WebSocketException ex)
+        catch (Exception ex)
         {
             _logger.LogDebug(ex, "Failed to send to HA WebSocket {ConnectionId}", data.ConnectionId);
         }
@@ -554,17 +598,11 @@ public class TunnelClient : IAsyncDisposable
     {
         if (_activeWebSockets.TryRemove(close.ConnectionId, out var wsClient))
         {
-            if (wsClient.State == WebSocketState.Open)
+            try
             {
-                try
-                {
-                    await wsClient.CloseAsync(
-                        (WebSocketCloseStatus)close.StatusCode,
-                        close.Reason,
-                        cancellationToken);
-                }
-                catch { }
+                await wsClient.CloseAsync((ushort)close.StatusCode, close.Reason);
             }
+            catch { }
             wsClient.Dispose();
         }
     }
@@ -592,7 +630,8 @@ public class TunnelClient : IAsyncDisposable
 
     private async Task<TunnelMessage?> ReceiveMessageAsync(CancellationToken cancellationToken)
     {
-        var buffer = new byte[Constants.MaxWebSocketMessageSize];
+        // Use smaller buffer - WebSocket fragments large messages anyway
+        var buffer = new byte[65536];
         using var ms = new MemoryStream();
 
         WebSocketReceiveResult result;
@@ -638,11 +677,11 @@ public class TunnelClient : IAsyncDisposable
         // Close all active WebSocket connections
         foreach (var (_, ws) in _activeWebSockets)
         {
-            if (ws.State == WebSocketState.Open)
+            if (ws.IsConnected)
             {
                 try
                 {
-                    await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Addon shutdown", CancellationToken.None);
+                    await ws.CloseAsync(1000, "Addon shutdown");
                 }
                 catch { }
             }

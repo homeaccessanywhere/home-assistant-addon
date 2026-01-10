@@ -95,7 +95,18 @@ public class TunnelHttpResponse : TunnelMessage
     [JsonPropertyName("processingTimeMs")]
     public long ProcessingTimeMs { get; set; }
 
+    /// <summary>
+    /// True if this response has more chunks coming (for large responses)
+    /// </summary>
+    [JsonPropertyName("hasMoreChunks")]
+    public bool HasMoreChunks { get; set; }
+
     public void SetBody(byte[] body)
+    {
+        BodyBase64 = Convert.ToBase64String(body);
+    }
+
+    public void SetBody(ReadOnlySpan<byte> body)
     {
         BodyBase64 = Convert.ToBase64String(body);
     }
