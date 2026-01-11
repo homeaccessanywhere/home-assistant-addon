@@ -17,6 +17,12 @@ public class TunnelClient : IAsyncDisposable
     private readonly HttpClient _haHttpClient;
     private readonly ILogger<TunnelClient> _logger;
     private readonly ConcurrentDictionary<string, RawWebSocketClient> _activeWebSockets = new();
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _pendingHttpRequests = new();
+    // Track whether we're in the middle of a fragmented message for each WebSocket connection
+    // Value is the original opcode (Text or Binary) when in a fragment, null otherwise
+    private readonly ConcurrentDictionary<string, WebSocketOpcode?> _webSocketFragmentState = new();
+    // Lock to prevent concurrent WebSocket sends which can corrupt the connection
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
 
     private ClientWebSocket? _webSocket;
     private CancellationTokenSource? _cts;
@@ -240,6 +246,10 @@ public class TunnelClient : IAsyncDisposable
                     await HandleWebSocketCloseAsync(wsClose, cancellationToken);
                     break;
 
+                case HttpRequestAbortedMessage aborted:
+                    HandleHttpRequestAborted(aborted);
+                    break;
+
                 default:
                     _logger.LogDebug("Received message type {Type}", message.Type);
                     break;
@@ -257,6 +267,16 @@ public class TunnelClient : IAsyncDisposable
     private async Task HandleHttpRequestAsync(TunnelHttpRequest request, CancellationToken cancellationToken)
     {
         var startTime = DateTimeOffset.UtcNow;
+
+        // Check if this is a streaming endpoint (e.g., /logs/follow)
+        var isStreamingEndpoint = request.Path.Contains("/follow");
+        var timeout = isStreamingEndpoint ? 300 : request.TimeoutSeconds;
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(timeout));
+
+        // Register this request so it can be cancelled if client disconnects
+        _pendingHttpRequests[request.RequestId] = cts;
 
         try
         {
@@ -287,18 +307,6 @@ public class TunnelClient : IAsyncDisposable
                 }
             }
 
-            // Send to Home Assistant - use ResponseHeadersRead to stream response
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-
-            // Check if this is a streaming endpoint (logs, events, etc.)
-            var isStreamingEndpoint = request.Path.Contains("/logs") ||
-                                      request.Path.Contains("/stream") ||
-                                      request.Path.Contains("/events");
-
-            // Use longer timeout for streaming endpoints, but not infinite
-            var timeout = isStreamingEndpoint ? 120 : request.TimeoutSeconds;
-            cts.CancelAfter(TimeSpan.FromSeconds(timeout));
-
             using var haResponse = await _haHttpClient.SendAsync(
                 haRequest,
                 HttpCompletionOption.ResponseHeadersRead,
@@ -325,20 +333,33 @@ public class TunnelClient : IAsyncDisposable
 
             while (!endOfStream)
             {
-                // Fill buffer completely if possible
                 int bytesInBuffer = 0;
-                while (bytesInBuffer < MaxHttpChunkSize)
-                {
-                    var bytesRead = await stream.ReadAsync(
-                        buffer.AsMemory(bytesInBuffer, MaxHttpChunkSize - bytesInBuffer),
-                        cts.Token);
 
+                if (isStreamingEndpoint)
+                {
+                    // For streaming endpoints, send data immediately without buffering
+                    var bytesRead = await stream.ReadAsync(buffer, cts.Token);
                     if (bytesRead == 0)
-                    {
                         endOfStream = true;
-                        break;
+                    else
+                        bytesInBuffer = bytesRead;
+                }
+                else
+                {
+                    // For regular requests, fill buffer completely if possible
+                    while (bytesInBuffer < MaxHttpChunkSize)
+                    {
+                        var bytesRead = await stream.ReadAsync(
+                            buffer.AsMemory(bytesInBuffer, MaxHttpChunkSize - bytesInBuffer),
+                            cts.Token);
+
+                        if (bytesRead == 0)
+                        {
+                            endOfStream = true;
+                            break;
+                        }
+                        bytesInBuffer += bytesRead;
                     }
-                    bytesInBuffer += bytesRead;
                 }
 
                 // Skip empty chunks (except first one which carries headers)
@@ -369,6 +390,11 @@ public class TunnelClient : IAsyncDisposable
                 await SendMessageAsync(response, cancellationToken);
             }
         }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            // Request was cancelled (client disconnected or timeout) - no response needed
+            _logger.LogDebug("Request {RequestId} was cancelled", request.RequestId);
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error handling request {RequestId}", request.RequestId);
@@ -379,6 +405,19 @@ public class TunnelClient : IAsyncDisposable
                 "Bad Gateway - Could not reach Home Assistant");
 
             await SendMessageAsync(errorResponse, cancellationToken);
+        }
+        finally
+        {
+            _pendingHttpRequests.TryRemove(request.RequestId, out _);
+        }
+    }
+
+    private void HandleHttpRequestAborted(HttpRequestAbortedMessage aborted)
+    {
+        if (_pendingHttpRequests.TryRemove(aborted.RequestId, out var cts))
+        {
+            _logger.LogDebug("Aborting request {RequestId}: {Reason}", aborted.RequestId, aborted.Reason);
+            cts.Cancel();
         }
     }
 
@@ -519,6 +558,7 @@ public class TunnelClient : IAsyncDisposable
         finally
         {
             _activeWebSockets.TryRemove(connectionId, out _);
+            _webSocketFragmentState.TryRemove(connectionId, out _);
             try { await wsClient.CloseAsync(1000, "Connection closed"); } catch { }
             wsClient.Dispose();
 
@@ -571,7 +611,9 @@ public class TunnelClient : IAsyncDisposable
     {
         if (!_activeWebSockets.TryGetValue(data.ConnectionId, out var wsClient))
         {
-            _logger.LogDebug("Received WebSocket data for unknown connection {ConnectionId}", data.ConnectionId);
+            // This can happen due to race conditions when a WebSocket is closing -
+            // data messages may arrive after the connection was removed. This is normal.
+            _logger.LogTrace("Received WebSocket data for unknown connection {ConnectionId} (likely already closed)", data.ConnectionId);
             return;
         }
 
@@ -584,18 +626,50 @@ public class TunnelClient : IAsyncDisposable
 
         try
         {
-            var opcode = data.IsText ? WebSocketOpcode.Text : WebSocketOpcode.Binary;
-            // Pass as ReadOnlyMemory to use the optimized SendFrameAsync
+            // Determine the correct opcode based on WebSocket framing rules:
+            // - First frame of a message uses Text (0x1) or Binary (0x2)
+            // - Continuation frames must use Continuation (0x0)
+            WebSocketOpcode opcode;
+            var originalOpcode = data.IsText ? WebSocketOpcode.Text : WebSocketOpcode.Binary;
+
+            if (_webSocketFragmentState.TryGetValue(data.ConnectionId, out var fragmentOpcode) && fragmentOpcode.HasValue)
+            {
+                // We're in a fragmented message - use Continuation opcode
+                opcode = WebSocketOpcode.Continuation;
+            }
+            else
+            {
+                // Start of a new message - use the actual opcode
+                opcode = originalOpcode;
+            }
+
+            // Update fragment state
+            if (data.EndOfMessage)
+            {
+                // Message complete - clear fragment state
+                _webSocketFragmentState.TryRemove(data.ConnectionId, out _);
+            }
+            else
+            {
+                // Message continues - store the original opcode for reference
+                _webSocketFragmentState[data.ConnectionId] = originalOpcode;
+            }
+
             await wsClient.SendFrameAsync(opcode, bytes.AsMemory(), data.EndOfMessage, cancellationToken);
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Failed to send to HA WebSocket {ConnectionId}", data.ConnectionId);
+            // Clear fragment state on error to avoid corrupt state
+            _webSocketFragmentState.TryRemove(data.ConnectionId, out _);
         }
     }
 
     private async Task HandleWebSocketCloseAsync(WebSocketCloseMessage close, CancellationToken cancellationToken)
     {
+        // Clean up fragment state
+        _webSocketFragmentState.TryRemove(close.ConnectionId, out _);
+
         if (_activeWebSockets.TryRemove(close.ConnectionId, out var wsClient))
         {
             try
@@ -621,11 +695,19 @@ public class TunnelClient : IAsyncDisposable
 
     private async Task SendMessageAsync(TunnelMessage message, CancellationToken cancellationToken)
     {
-        if (!IsConnected)
-            return;
+        await _sendLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!IsConnected)
+                return;
 
-        var bytes = message.ToBytes();
-        await _webSocket!.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken);
+            var bytes = message.ToBytes();
+            await _webSocket!.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
     }
 
     private async Task<TunnelMessage?> ReceiveMessageAsync(CancellationToken cancellationToken)
@@ -708,5 +790,6 @@ public class TunnelClient : IAsyncDisposable
         }
 
         _haHttpClient.Dispose();
+        _sendLock.Dispose();
     }
 }

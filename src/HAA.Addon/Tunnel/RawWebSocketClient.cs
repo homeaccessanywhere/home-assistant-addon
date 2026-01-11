@@ -89,23 +89,21 @@ public class RawWebSocketClient : IDisposable
             {
                 foreach (var (headerName, values) in additionalHeaders)
                 {
-                    // Skip WebSocket-specific and hop-by-hop headers
+                    // Skip WebSocket-specific and hop-by-hop headers that we handle ourselves
                     if (headerName.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
                         headerName.Equals("Upgrade", StringComparison.OrdinalIgnoreCase) ||
                         headerName.Equals("Connection", StringComparison.OrdinalIgnoreCase) ||
-                        headerName.StartsWith("Sec-WebSocket-", StringComparison.OrdinalIgnoreCase))
+                        headerName.Equals("Origin", StringComparison.OrdinalIgnoreCase) ||
+                        headerName.StartsWith("Sec-WebSocket-", StringComparison.OrdinalIgnoreCase) ||
+                        // Skip headers that could cause issues
+                        headerName.StartsWith("X-Forwarded-", StringComparison.OrdinalIgnoreCase) ||
+                        headerName.Equals("X-Real-IP", StringComparison.OrdinalIgnoreCase))
                     {
                         continue;
                     }
 
-                    // Forward cookies, authorization, and other relevant headers
-                    if (headerName.Equals("Cookie", StringComparison.OrdinalIgnoreCase) ||
-                        headerName.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ||
-                        headerName.Equals("X-Ingress-Path", StringComparison.OrdinalIgnoreCase) ||
-                        headerName.Equals("X-Hass-Source", StringComparison.OrdinalIgnoreCase))
-                    {
-                        requestBuilder.Append($"{headerName}: {string.Join(", ", values)}\r\n");
-                    }
+                    // Forward all other headers (Cookie, Authorization, Accept-*, X-Ingress-Path, etc.)
+                    requestBuilder.Append($"{headerName}: {string.Join(", ", values)}\r\n");
                 }
             }
 
