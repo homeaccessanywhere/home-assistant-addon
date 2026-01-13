@@ -11,7 +11,7 @@ if [ -z "$CONNECTION_KEY" ] || [ "$CONNECTION_KEY" == "null" ]; then
     echo "============================================"
     echo "ERROR: Connection key not configured!"
     echo ""
-    echo "1. Go to https://homeassistantanywhere.com"
+    echo "1. Go to https://homeaccessanywhere.com"
     echo "2. Register and get your Connection Key"
     echo "3. Enter it in the addon configuration"
     echo "============================================"
@@ -51,12 +51,12 @@ else
     HOME_ASSISTANT_URL="http://homeassistant:${HA_PORT}"
 fi
 
-echo "Starting Home Assistant Anywhere..."
+echo "Starting Home Access Anywhere..."
 echo "Connection key: ${CONNECTION_KEY:0:8}..."
 echo "Home Assistant URL: $HOME_ASSISTANT_URL"
 
 # Configure environment
-export ServerUrl="wss://api.homeassistantanywhere.com"
+export ServerUrl="wss://api.homeaccessanywhere.com"
 export ConnectionKey="$CONNECTION_KEY"
 export HomeAssistantUrl="$HOME_ASSISTANT_URL"
 

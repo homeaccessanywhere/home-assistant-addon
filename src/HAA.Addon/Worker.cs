@@ -21,12 +21,12 @@ public class Worker : BackgroundService
             ?? throw new InvalidOperationException("ConnectionKey is required");
 
         var serverUrl = _configuration.GetValue<string>("ServerUrl")
-            ?? "wss://api.homeassistantanywhere.com";
+            ?? "wss://api.homeaccessanywhere.com";
 
         var homeAssistantUrl = _configuration.GetValue<string>("HomeAssistantUrl")
             ?? "http://homeassistant:8123";
 
-        _logger.LogInformation("Starting Home Assistant Anywhere Addon");
+        _logger.LogInformation("Starting Home Access Anywhere Addon");
         _logger.LogInformation("Server: {ServerUrl}", serverUrl);
         _logger.LogInformation("Home Assistant: {HAUrl}", homeAssistantUrl);
 

@@ -8,7 +8,7 @@ public static class Constants
     /// <summary>
     /// The base domain for tunnel URLs
     /// </summary>
-    public const string BaseDomain = "homeassistantanywhere.com";
+    public const string BaseDomain = "homeaccessanywhere.com";
 
     /// <summary>
     /// WebSocket endpoint path on the server
