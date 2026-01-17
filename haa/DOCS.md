@@ -5,10 +5,17 @@ Access your Home Assistant from anywhere without port forwarding or VPN.
 ## Setup
 
 1. Go to [homeaccessanywhere.com](https://homeaccessanywhere.com) and create an account
-2. Register your Home Assistant and choose a subdomain (e.g., `myhome`)
-3. Copy your **Connection Key** from the dashboard
+2. **Verify your email address** by clicking the link in the confirmation email
+3. Copy your **Connection Key** from the registration page or dashboard
 4. Paste the Connection Key in this addon's configuration
 5. Start the addon
+
+**Note:** Your tunnel will only become active after you verify your email address.
+
+## Recommended Settings
+
+- **Start on boot:** Enable this so the addon starts automatically after a restart
+- **Watchdog:** Enabled by default - automatically restarts the addon if it becomes unresponsive
 
 ## Usage
 

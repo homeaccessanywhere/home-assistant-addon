@@ -36,9 +36,9 @@ public static class Constants
     public const int MaxMissedHeartbeats = 3;
 
     /// <summary>
-    /// Maximum size of a WebSocket message in bytes (10 MB)
+    /// Maximum size of a WebSocket message in bytes (1 MB)
     /// </summary>
-    public const int MaxWebSocketMessageSize = 10 * 1024 * 1024;
+    public const int MaxWebSocketMessageSize = 1 * 1024 * 1024;
 
     /// <summary>
     /// Initial reconnect delay in seconds
@@ -53,5 +53,5 @@ public static class Constants
     /// <summary>
     /// Application version
     /// </summary>
-    public const string Version = "1.0.0";
+    public const string Version = "1.0.1";
 }

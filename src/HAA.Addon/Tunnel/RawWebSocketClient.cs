@@ -108,7 +108,7 @@ public class RawWebSocketClient : IDisposable
             }
 
             requestBuilder.Append($"Origin: http://{host}:{port}\r\n");
-            requestBuilder.Append($"User-Agent: HAA-Addon/1.0\r\n");
+            requestBuilder.Append($"User-Agent: HAA-Addon/{HAA.Shared.Constants.Version}\r\n");
             requestBuilder.Append($"Pragma: no-cache\r\n");
             requestBuilder.Append($"Cache-Control: no-cache\r\n");
             requestBuilder.Append("\r\n");
